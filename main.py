@@ -13,8 +13,16 @@ app = FastAPI()
 
 def get_data(ticker):
     df = yf.download(ticker, period="5y", interval="1d")
+
+    # Fix for yfinance multi-index columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
     df.dropna(inplace=True)
+
     return df
+
 
 def add_indicators(df):
     df["rsi"] = RSIIndicator(df["Close"]).rsi()
