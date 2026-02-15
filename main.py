@@ -27,7 +27,6 @@ app.add_middleware(
 def get_data(ticker):
     df = yf.download(ticker, period="5y", interval="1d")
 
-    # Fix for yfinance multi-index columns
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -57,10 +56,9 @@ def analyze(ticker: str):
         df = add_indicators(df)
 
         # ==============================
-        # LOG RETURNS MODEL
+        # LOG RETURNS
         # ==============================
         returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
-
         mean_return = returns.mean()
         volatility = returns.std()
 
@@ -77,18 +75,19 @@ def analyze(ticker: str):
         # REGIME DETECTION
         # ==============================
 
-        # Trend regime (50 / 200 SMA)
         df["sma_50"] = df["Close"].rolling(50).mean()
         df["sma_200"] = df["Close"].rolling(200).mean()
 
         if df["sma_50"].iloc[-1] > df["sma_200"].iloc[-1]:
             trend_regime = "Uptrend"
+            trend_score = 1
         elif df["sma_50"].iloc[-1] < df["sma_200"].iloc[-1]:
             trend_regime = "Downtrend"
+            trend_score = 0
         else:
             trend_regime = "Range"
+            trend_score = 0.5
 
-        # Volatility regime
         rolling_vol = returns.rolling(30).std() * np.sqrt(252)
         current_vol = rolling_vol.iloc[-1]
         median_vol = rolling_vol.median()
@@ -99,11 +98,10 @@ def analyze(ticker: str):
             volatility_regime = "Low Volatility"
 
         # ==============================
-        # MONTE CARLO (30 DAYS)
+        # MONTE CARLO
         # ==============================
         days = 30
         simulations = []
-
         last_price = df["Close"].iloc[-1]
 
         for _ in range(1000):
@@ -118,9 +116,6 @@ def analyze(ticker: str):
         probability_up = float(np.mean(final_prices > last_price))
         var_95 = float(np.percentile(final_prices, 5))
 
-        # ==============================
-        # DIRECTIONAL BIAS
-        # ==============================
         if probability_up > 0.55:
             bias = "Bullish"
         elif probability_up < 0.45:
@@ -129,8 +124,52 @@ def analyze(ticker: str):
             bias = "Neutral"
 
         # ==============================
+        # COMPOSITE SIGNAL SCORING
+        # ==============================
+
+        # Normalize components
+
+        prob_score = probability_up  # already 0–1
+
+        sharpe_score = min(max((sharpe_ratio + 1) / 2, 0), 1)
+
+        rsi = df["rsi"].iloc[-1]
+        if rsi < 30:
+            rsi_score = 1
+        elif rsi > 70:
+            rsi_score = 0
+        else:
+            rsi_score = 1 - abs(rsi - 50) / 20
+            rsi_score = min(max(rsi_score, 0), 1)
+
+        macd = df["macd"].iloc[-1]
+        macd_score = 1 if macd > 0 else 0
+
+        # Weighted sum
+        signal_score = (
+            prob_score * 0.30 +
+            sharpe_score * 0.20 +
+            rsi_score * 0.15 +
+            macd_score * 0.15 +
+            trend_score * 0.20
+        ) * 100
+
+        # Signal label
+        if signal_score > 75:
+            signal_label = "Strong Buy"
+        elif signal_score > 60:
+            signal_label = "Buy"
+        elif signal_score > 40:
+            signal_label = "Neutral"
+        elif signal_score > 25:
+            signal_label = "Sell"
+        else:
+            signal_label = "Strong Sell"
+
+        # ==============================
         # RESPONSE
         # ==============================
+
         return {
             "ticker": ticker,
             "last_price": float(last_price),
@@ -140,11 +179,13 @@ def analyze(ticker: str):
             "annual_return": float(annual_return),
             "annual_volatility": float(annual_volatility),
             "sharpe_ratio": float(sharpe_ratio),
-            "rsi": float(df["rsi"].iloc[-1]),
-            "macd": float(df["macd"].iloc[-1]),
+            "rsi": float(rsi),
+            "macd": float(macd),
             "trend_regime": trend_regime,
             "volatility_regime": volatility_regime,
             "bias": bias,
+            "signal_score": float(signal_score),
+            "signal_label": signal_label,
             "confidence_interval_95": {
                 "lower": float(np.percentile(final_prices, 2.5)),
                 "upper": float(np.percentile(final_prices, 97.5))
