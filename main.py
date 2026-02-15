@@ -74,6 +74,31 @@ def analyze(ticker: str):
         )
 
         # ==============================
+        # REGIME DETECTION
+        # ==============================
+
+        # Trend regime (50 / 200 SMA)
+        df["sma_50"] = df["Close"].rolling(50).mean()
+        df["sma_200"] = df["Close"].rolling(200).mean()
+
+        if df["sma_50"].iloc[-1] > df["sma_200"].iloc[-1]:
+            trend_regime = "Uptrend"
+        elif df["sma_50"].iloc[-1] < df["sma_200"].iloc[-1]:
+            trend_regime = "Downtrend"
+        else:
+            trend_regime = "Range"
+
+        # Volatility regime
+        rolling_vol = returns.rolling(30).std() * np.sqrt(252)
+        current_vol = rolling_vol.iloc[-1]
+        median_vol = rolling_vol.median()
+
+        if current_vol > median_vol:
+            volatility_regime = "High Volatility"
+        else:
+            volatility_regime = "Low Volatility"
+
+        # ==============================
         # MONTE CARLO (30 DAYS)
         # ==============================
         days = 30
@@ -117,6 +142,8 @@ def analyze(ticker: str):
             "sharpe_ratio": float(sharpe_ratio),
             "rsi": float(df["rsi"].iloc[-1]),
             "macd": float(df["macd"].iloc[-1]),
+            "trend_regime": trend_regime,
+            "volatility_regime": volatility_regime,
             "bias": bias,
             "confidence_interval_95": {
                 "lower": float(np.percentile(final_prices, 2.5)),
@@ -124,10 +151,6 @@ def analyze(ticker: str):
             },
             "simulations": simulations.tolist()
         }
-
-    except Exception as e:
-        return {"error": str(e)}
-
 
     except Exception as e:
         return {"error": str(e)}
