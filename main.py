@@ -1,9 +1,12 @@
 import numpy as np
+import pandas as pd
 import yfinance as yf
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
+
+# Explicit CORS (works reliably with Railway)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ============================
@@ -29,19 +32,19 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
 
-    return rsi.iloc[-1]
+    return float(rsi.iloc[-1])
 
 
 def monte_carlo_simulation(last_price, daily_volatility):
     simulations = []
 
     for _ in range(MONTE_CARLO_SIMS):
-        price_path = [last_price]
+        price_path = [float(last_price)]
 
         for _ in range(MONTE_CARLO_DAYS):
             shock = np.random.normal(0, daily_volatility)
             price = price_path[-1] * (1 + shock)
-            price_path.append(price)
+            price_path.append(float(price))
 
         simulations.append(price_path)
 
@@ -70,7 +73,7 @@ def score_signal(rsi, macd):
     else:
         label = "Neutral"
 
-    return score, label
+    return float(score), label
 
 
 # ============================
@@ -88,21 +91,39 @@ def analyze(ticker):
     lite_mode = request.args.get("lite", "false").lower() == "true"
 
     try:
-        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        data = yf.download(
+            ticker,
+            period="6mo",
+            interval="1d",
+            progress=False,
+            auto_adjust=True
+        )
 
-        if data.empty:
+        if data is None or data.empty:
             return jsonify({"error": "No data found"}), 404
 
-        close_prices = data["Close"]
+        # Handle MultiIndex safely
+        if isinstance(data.columns, pd.MultiIndex):
+            close_prices = data["Close"][ticker.upper()]
+        else:
+            close_prices = data["Close"]
 
-        # Indicators
+        close_prices = close_prices.dropna()
+
+        if close_prices.empty:
+            return jsonify({"error": "No valid price data"}), 404
+
+        # RSI
         rsi = calculate_rsi(close_prices)
 
+        # MACD (FORCED FLOAT)
         ema_12 = close_prices.ewm(span=12).mean()
         ema_26 = close_prices.ewm(span=26).mean()
-        macd = (ema_12 - ema_26).iloc[-1]
 
-        daily_volatility = close_prices.pct_change().std()
+        macd_series = ema_12 - ema_26
+        macd = float(macd_series.iloc[-1])
+
+        daily_volatility = float(close_prices.pct_change().std())
 
         score, label = score_signal(rsi, macd)
 
@@ -110,14 +131,14 @@ def analyze(ticker):
 
         response = {
             "ticker": ticker.upper(),
-            "signal_score": float(score),
+            "signal_score": score,
             "signal_label": label,
             "trend_regime": trend_regime,
-            "rsi": float(rsi),
-            "macd": float(macd),
+            "rsi": rsi,
+            "macd": macd
         }
 
-        # Only include simulations if NOT lite
+        # Monte Carlo only if NOT lite
         if not lite_mode:
             simulations = monte_carlo_simulation(
                 close_prices.iloc[-1],
@@ -132,7 +153,7 @@ def analyze(ticker):
 
 
 # ============================
-# START SERVER
+# RUN
 # ============================
 
 if __name__ == "__main__":
