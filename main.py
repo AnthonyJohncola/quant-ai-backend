@@ -102,11 +102,12 @@ def analyze(ticker):
         if data is None or data.empty:
             return jsonify({"error": "No data found"}), 404
 
-        # Handle MultiIndex safely
-        if isinstance(data.columns, pd.MultiIndex):
-            close_prices = data["Close"][ticker.upper()]
-        else:
-            close_prices = data["Close"]
+       # Handle MultiIndex safely
+if isinstance(data.columns, pd.MultiIndex):
+    close_prices = data["Close"].iloc[:, 0]
+else:
+    close_prices = data["Close"]
+
 
         close_prices = close_prices.dropna()
 
