@@ -1,191 +1,139 @@
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-import yfinance as yf
 import numpy as np
-import pandas as pd
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
+import yfinance as yf
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-app = FastAPI()
+app = Flask(__name__)
+CORS(app)
 
-# ---------------------------
-# CORS CONFIG
-# ---------------------------
+# ============================
+# CONFIG
+# ============================
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------
-# DATA FUNCTIONS
-# ---------------------------
-
-def get_data(ticker):
-    df = yf.download(ticker, period="5y", interval="1d")
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df[["Open", "High", "Low", "Close", "Volume"]]
-    df.dropna(inplace=True)
-
-    return df
+MONTE_CARLO_SIMS = 500
+MONTE_CARLO_DAYS = 60
 
 
-def add_indicators(df):
-    df["rsi"] = RSIIndicator(df["Close"]).rsi()
-    df["macd"] = MACD(df["Close"]).macd()
-    df.dropna(inplace=True)
-    return df
+# ============================
+# UTIL FUNCTIONS
+# ============================
+
+def calculate_rsi(prices, period=14):
+    delta = prices.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi.iloc[-1]
 
 
-# ---------------------------
-# API ENDPOINT
-# ---------------------------
+def monte_carlo_simulation(last_price, daily_volatility):
+    simulations = []
 
-@app.get("/analyze/{ticker}")
-def analyze(ticker: str, lite: bool = Query(False)):
+    for _ in range(MONTE_CARLO_SIMS):
+        price_path = [last_price]
+
+        for _ in range(MONTE_CARLO_DAYS):
+            shock = np.random.normal(0, daily_volatility)
+            price = price_path[-1] * (1 + shock)
+            price_path.append(price)
+
+        simulations.append(price_path)
+
+    return simulations
+
+
+def score_signal(rsi, macd):
+    score = 50
+
+    if rsi < 30:
+        score += 20
+    elif rsi > 70:
+        score -= 20
+
+    if macd > 0:
+        score += 10
+    else:
+        score -= 10
+
+    score = max(0, min(100, score))
+
+    if score > 65:
+        label = "Bullish"
+    elif score < 35:
+        label = "Bearish"
+    else:
+        label = "Neutral"
+
+    return score, label
+
+
+# ============================
+# ROUTES
+# ============================
+
+@app.route("/")
+def home():
+    return "Quant AI Backend Running"
+
+
+@app.route("/analyze/<ticker>")
+def analyze(ticker):
+
+    lite_mode = request.args.get("lite", "false").lower() == "true"
 
     try:
-        ticker = ticker.upper()
+        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
 
-        df = get_data(ticker)
-        df = add_indicators(df)
+        if data.empty:
+            return jsonify({"error": "No data found"}), 404
 
-        returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
-        mean_return = returns.mean()
-        volatility = returns.std()
+        close_prices = data["Close"]
 
-        annual_return = mean_return * 252
-        annual_volatility = volatility * np.sqrt(252)
+        # Indicators
+        rsi = calculate_rsi(close_prices)
 
-        sharpe_ratio = (
-            annual_return / annual_volatility
-            if annual_volatility != 0
-            else 0
-        )
+        ema_12 = close_prices.ewm(span=12).mean()
+        ema_26 = close_prices.ewm(span=26).mean()
+        macd = (ema_12 - ema_26).iloc[-1]
 
-        # ==============================
-        # REGIME DETECTION
-        # ==============================
+        daily_volatility = close_prices.pct_change().std()
 
-        df["sma_50"] = df["Close"].rolling(50).mean()
-        df["sma_200"] = df["Close"].rolling(200).mean()
+        score, label = score_signal(rsi, macd)
 
-        if df["sma_50"].iloc[-1] > df["sma_200"].iloc[-1]:
-            trend_regime = "Uptrend"
-            trend_score = 1
-        elif df["sma_50"].iloc[-1] < df["sma_200"].iloc[-1]:
-            trend_regime = "Downtrend"
-            trend_score = 0
-        else:
-            trend_regime = "Range"
-            trend_score = 0.5
-
-        rolling_vol = returns.rolling(30).std() * np.sqrt(252)
-        current_vol = rolling_vol.iloc[-1]
-        median_vol = rolling_vol.median()
-
-        volatility_regime = (
-            "High Volatility" if current_vol > median_vol else "Low Volatility"
-        )
-
-        # ==============================
-        # MONTE CARLO
-        # ==============================
-
-        days = 30
-        simulations = []
-        last_price = df["Close"].iloc[-1]
-
-        for _ in range(1000):
-            daily_returns = np.random.normal(mean_return, volatility, days)
-            price_path = last_price * np.exp(np.cumsum(daily_returns))
-            simulations.append(price_path)
-
-        simulations = np.array(simulations)
-        final_prices = simulations[:, -1]
-
-        expected_price = np.mean(final_prices)
-        probability_up = float(np.mean(final_prices > last_price))
-        var_95 = float(np.percentile(final_prices, 5))
-
-        if probability_up > 0.55:
-            bias = "Bullish"
-        elif probability_up < 0.45:
-            bias = "Bearish"
-        else:
-            bias = "Neutral"
-
-        # ==============================
-        # SIGNAL SCORING
-        # ==============================
-
-        prob_score = probability_up
-        sharpe_score = min(max((sharpe_ratio + 1) / 2, 0), 1)
-
-        rsi = df["rsi"].iloc[-1]
-        if rsi < 30:
-            rsi_score = 1
-        elif rsi > 70:
-            rsi_score = 0
-        else:
-            rsi_score = 1 - abs(rsi - 50) / 20
-            rsi_score = min(max(rsi_score, 0), 1)
-
-        macd = df["macd"].iloc[-1]
-        macd_score = 1 if macd > 0 else 0
-
-        signal_score = (
-            prob_score * 0.30 +
-            sharpe_score * 0.20 +
-            rsi_score * 0.15 +
-            macd_score * 0.15 +
-            trend_score * 0.20
-        ) * 100
-
-        if signal_score > 75:
-            signal_label = "Strong Buy"
-        elif signal_score > 60:
-            signal_label = "Buy"
-        elif signal_score > 40:
-            signal_label = "Neutral"
-        elif signal_score > 25:
-            signal_label = "Sell"
-        else:
-            signal_label = "Strong Sell"
+        trend_regime = "Bullish Trend" if macd > 0 else "Bearish Trend"
 
         response = {
-            "ticker": ticker,
-            "last_price": float(last_price),
-            "expected_30d_price": float(expected_price),
-            "probability_upside": probability_up,
-            "value_at_risk_95": var_95,
-            "annual_return": float(annual_return),
-            "annual_volatility": float(annual_volatility),
-            "sharpe_ratio": float(sharpe_ratio),
+            "ticker": ticker.upper(),
+            "signal_score": float(score),
+            "signal_label": label,
+            "trend_regime": trend_regime,
             "rsi": float(rsi),
             "macd": float(macd),
-            "trend_regime": trend_regime,
-            "volatility_regime": volatility_regime,
-            "bias": bias,
-            "signal_score": float(signal_score),
-            "signal_label": signal_label,
-            "confidence_interval_95": {
-                "lower": float(np.percentile(final_prices, 2.5)),
-                "upper": float(np.percentile(final_prices, 97.5))
-            }
         }
 
         # Only include simulations if NOT lite
-        if not lite:
-            response["simulations"] = simulations.tolist()
+        if not lite_mode:
+            simulations = monte_carlo_simulation(
+                close_prices.iloc[-1],
+                daily_volatility
+            )
+            response["simulations"] = simulations
 
-        return response
+        return jsonify(response)
 
     except Exception as e:
-        return {"error": str(e)}
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================
+# START SERVER
+# ============================
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
