@@ -1,8 +1,7 @@
-fastapi
-uvicorn
-yfinance
-pandas
+flask
+flask-cors
 numpy
-scikit-learn
-ta
-textblob
+pandas
+yfinance
+gunicorn
+
