@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import numpy as np
@@ -48,16 +48,14 @@ def add_indicators(df):
 # ---------------------------
 
 @app.get("/analyze/{ticker}")
-def analyze(ticker: str):
+def analyze(ticker: str, lite: bool = Query(False)):
+
     try:
         ticker = ticker.upper()
 
         df = get_data(ticker)
         df = add_indicators(df)
 
-        # ==============================
-        # LOG RETURNS
-        # ==============================
         returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
         mean_return = returns.mean()
         volatility = returns.std()
@@ -92,14 +90,14 @@ def analyze(ticker: str):
         current_vol = rolling_vol.iloc[-1]
         median_vol = rolling_vol.median()
 
-        if current_vol > median_vol:
-            volatility_regime = "High Volatility"
-        else:
-            volatility_regime = "Low Volatility"
+        volatility_regime = (
+            "High Volatility" if current_vol > median_vol else "Low Volatility"
+        )
 
         # ==============================
         # MONTE CARLO
         # ==============================
+
         days = 30
         simulations = []
         last_price = df["Close"].iloc[-1]
@@ -124,13 +122,10 @@ def analyze(ticker: str):
             bias = "Neutral"
 
         # ==============================
-        # COMPOSITE SIGNAL SCORING
+        # SIGNAL SCORING
         # ==============================
 
-        # Normalize components
-
-        prob_score = probability_up  # already 0–1
-
+        prob_score = probability_up
         sharpe_score = min(max((sharpe_ratio + 1) / 2, 0), 1)
 
         rsi = df["rsi"].iloc[-1]
@@ -145,7 +140,6 @@ def analyze(ticker: str):
         macd = df["macd"].iloc[-1]
         macd_score = 1 if macd > 0 else 0
 
-        # Weighted sum
         signal_score = (
             prob_score * 0.30 +
             sharpe_score * 0.20 +
@@ -154,7 +148,6 @@ def analyze(ticker: str):
             trend_score * 0.20
         ) * 100
 
-        # Signal label
         if signal_score > 75:
             signal_label = "Strong Buy"
         elif signal_score > 60:
@@ -166,11 +159,7 @@ def analyze(ticker: str):
         else:
             signal_label = "Strong Sell"
 
-        # ==============================
-        # RESPONSE
-        # ==============================
-
-        return {
+        response = {
             "ticker": ticker,
             "last_price": float(last_price),
             "expected_30d_price": float(expected_price),
@@ -189,9 +178,14 @@ def analyze(ticker: str):
             "confidence_interval_95": {
                 "lower": float(np.percentile(final_prices, 2.5)),
                 "upper": float(np.percentile(final_prices, 97.5))
-            },
-            "simulations": simulations.tolist()
+            }
         }
+
+        # Only include simulations if NOT lite
+        if not lite:
+            response["simulations"] = simulations.tolist()
+
+        return response
 
     except Exception as e:
         return {"error": str(e)}
